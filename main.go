@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"time"
@@ -23,9 +27,40 @@ type Block struct {
 	BPM       int
 	Hash      string
 	PrevHash  string
+	Signature struct {
+		R *big.Int
+		S *big.Int
+	}
 }
 
 var Blockchain []Block
+
+// generate a private and public key pair
+func generateKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return privKey, &privKey.PublicKey, nil
+}
+
+func signBlockHash(privKey *ecdsa.PrivateKey, block Block) (r, s *big.Int, err error) {
+	blockHash := calculateHash(block)
+
+	hash := sha256.New()
+	hash.Write([]byte(blockHash))
+	blockHashBytes := hash.Sum(nil)
+
+	r, s, err = ecdsa.Sign(rand.Reader, privKey, blockHashBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return r, s, nil
+
+}
 
 func calculateHash(block Block) string {
 	record := fmt.Sprint(block.Index) + block.Timestamp + fmt.Sprint(block.BPM) + block.PrevHash
@@ -38,7 +73,7 @@ func calculateHash(block Block) string {
 	return hex.EncodeToString(hashed)
 }
 
-func generateBlock(oldBlock Block, BPM int) (Block, error) {
+func generateBlock(oldBlock Block, BPM int, privKey *ecdsa.PrivateKey) (Block, error) {
 
 	var newBlock Block
 
@@ -50,7 +85,28 @@ func generateBlock(oldBlock Block, BPM int) (Block, error) {
 	newBlock.PrevHash = oldBlock.Hash
 	newBlock.Hash = calculateHash(newBlock)
 
+	r, s, err := signBlockHash(privKey, newBlock)
+
+	if err != nil {
+		return newBlock, err
+	}
+
+	newBlock.Signature.R = r
+	newBlock.Signature.S = s
+
 	return newBlock, nil
+}
+
+func verifyBlcokSignature(block Block, pubKey *ecdsa.PublicKey) bool {
+	blockHash := calculateHash(block)
+
+	hash := sha256.New()
+	hash.Write([]byte(blockHash))
+	blockHashBytes := hash.Sum(nil)
+
+	valid := ecdsa.Verify(pubKey, blockHashBytes, block.Signature.R, block.Signature.S)
+
+	return valid
 }
 
 func isBlockValid(newBlock, oldBlock Block) bool {
@@ -125,8 +181,8 @@ func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-
-	newBlock, err := generateBlock(Blockchain[len(Blockchain)-1], m.BPM)
+	lastBlock := Blockchain[len(Blockchain)-1]
+	newBlock, err := generateBlock(lastBlock, m.BPM, privKey)
 	if err != nil {
 		respondWithJSON(w, r, http.StatusInternalServerError, m)
 		return
@@ -155,17 +211,41 @@ func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload i
 	w.Write(response)
 }
 
+var privKey *ecdsa.PrivateKey
+var pubKey *ecdsa.PublicKey
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	privKey, pubKey, err = generateKeyPair()
+
+	if err != nil {
+		log.Fatal("error generating key pair: ", err)
+	}
+
 	go func() {
 		t := time.Now()
-		genisisBlock := Block{0, t.String(), 0, "", ""}
-		spew.Dump(genisisBlock)
-		Blockchain = append(Blockchain, genisisBlock)
+		genesisBlock := Block{
+			Index:     0,
+			Timestamp: t.String(),
+			BPM:       0,
+			PrevHash:  "",
+			Hash:      "",
+		}
+
+		r, s, err := signBlockHash(privKey, genesisBlock)
+		if err != nil {
+			log.Fatal("Error signing genesis block: ", err)
+		}
+
+		genesisBlock.Signature.R = r
+		genesisBlock.Signature.S = s
+
+		Blockchain = append(Blockchain, genesisBlock)
+		spew.Dump(genesisBlock)
 
 	}()
 	log.Fatal(run())
