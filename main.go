@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"fmt"
@@ -22,15 +23,19 @@ import (
 )
 
 type Block struct {
-	Index     int
-	Timestamp string
-	BPM       int
-	Hash      string
-	PrevHash  string
-	Signature struct {
+	Index      int
+	Timestamp  string
+	BPM        int
+	Hash       string
+	PrevHash   string
+	Nonce      int
+	Difficulty int
+	Signature  struct {
 		R *big.Int
 		S *big.Int
 	}
+	PubKeyX *big.Int
+	PubKeyY *big.Int
 }
 
 var Blockchain []Block
@@ -63,14 +68,48 @@ func signBlockHash(privKey *ecdsa.PrivateKey, block Block) (r, s *big.Int, err e
 }
 
 func calculateHash(block Block) string {
-	record := fmt.Sprint(block.Index) + block.Timestamp + fmt.Sprint(block.BPM) + block.PrevHash
+	record := fmt.Sprint(block.Index) + block.Timestamp + fmt.Sprint(block.BPM) + block.PrevHash + fmt.Sprint(block.Nonce)
 
 	h := sha256.New()
 	h.Write([]byte(record))
-
 	hashed := h.Sum(nil)
 
 	return hex.EncodeToString(hashed)
+}
+func isValidProof(hash string, difficulty int) bool {
+	prefix := strings.Repeat("0", difficulty)
+	return strings.HasPrefix(hash, prefix)
+}
+func mineBlock(oldBlock Block, BPM int, privKey *ecdsa.PrivateKey, difficulty int) (Block, error) {
+	var newBlock Block
+
+	t := time.Now()
+
+	newBlock.Index = oldBlock.Index + 1
+	newBlock.BPM = BPM
+	newBlock.Timestamp = t.String()
+	newBlock.PrevHash = oldBlock.Hash
+	newBlock.Difficulty = difficulty
+
+	for {
+		newBlock.Nonce++
+		newBlock.Hash = calculateHash(newBlock)
+
+		if isValidProof(newBlock.Hash, difficulty) {
+			break
+		}
+
+	}
+	r, s, err := signBlockHash(privKey, newBlock)
+	if err != nil {
+		return newBlock, err
+	}
+
+	newBlock.Signature.R = r
+	newBlock.Signature.S = s
+
+	return newBlock, nil
+
 }
 
 func generateBlock(oldBlock Block, BPM int, privKey *ecdsa.PrivateKey) (Block, error) {
@@ -97,32 +136,43 @@ func generateBlock(oldBlock Block, BPM int, privKey *ecdsa.PrivateKey) (Block, e
 	return newBlock, nil
 }
 
-func verifyBlocokSignature(block Block, pubKey *ecdsa.PublicKey) bool {
+func verifyBlockSignature(block Block) bool {
+
+	minerPubKey := ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     block.PubKeyX,
+		Y:     block.PubKeyY,
+	}
+
 	blockHash := calculateHash(block)
 
 	hash := sha256.New()
 	hash.Write([]byte(blockHash))
 	blockHashBytes := hash.Sum(nil)
 
-	valid := ecdsa.Verify(pubKey, blockHashBytes, block.Signature.R, block.Signature.S)
+	valid := ecdsa.Verify(&minerPubKey, blockHashBytes, block.Signature.R, block.Signature.S)
 
 	return valid
 }
 
 func isBlockValid(newBlock, oldBlock Block) bool {
 	if oldBlock.Index+1 != newBlock.Index {
+		log.Println("index not valid")
 		return false
 	}
 
 	if oldBlock.Hash != newBlock.PrevHash {
+		log.Println("prev hash not valid")
 		return false
 	}
 
 	if calculateHash(newBlock) != newBlock.Hash {
+		log.Println("hash Not valid")
 		return false
 	}
 
-	if !verifyBlocokSignature(newBlock, pubKey) {
+	if !verifyBlockSignature(newBlock) {
+		log.Println("signature not valid")
 		return false
 	}
 
@@ -176,30 +226,33 @@ type Message struct {
 }
 
 func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
-	var m Message
+	var newBlock Block
 
 	decoder := json.NewDecoder(r.Body)
-
-	if err := decoder.Decode(&m); err != nil {
-		respondWithJSON(w, r, http.StatusBadRequest, r.Body)
+	if err := decoder.Decode(&newBlock); err != nil {
+		respondWithJSON(w, r, http.StatusBadRequest, "Invalid block format")
 		return
 	}
 	defer r.Body.Close()
+	spew.Dump(newBlock)
+
 	lastBlock := Blockchain[len(Blockchain)-1]
-	newBlock, err := generateBlock(lastBlock, m.BPM, privKey)
-	if err != nil {
-		respondWithJSON(w, r, http.StatusInternalServerError, m)
+
+	// Validate proof-of-work
+	if !isValidProof(newBlock.Hash, newBlock.Difficulty) {
+		respondWithJSON(w, r, http.StatusForbidden, "Block does not meet proof-of-work requirements")
 		return
 	}
 
-	if isBlockValid(newBlock, Blockchain[len(Blockchain)-1]) {
-		newBlockchain := append(Blockchain, newBlock)
-		replaceChain(newBlockchain)
+	// Validate if the new block is legitimate
+	if isBlockValid(newBlock, lastBlock) {
+		Blockchain = append(Blockchain, newBlock)
 		spew.Dump(Blockchain)
+		respondWithJSON(w, r, http.StatusCreated, newBlock)
+	} else {
+		log.Println("Invalid block")
+		respondWithJSON(w, r, http.StatusBadRequest, "Invalid block")
 	}
-
-	respondWithJSON(w, r, http.StatusCreated, newBlock)
-
 }
 
 func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload interface{}) {
@@ -233,10 +286,11 @@ func main() {
 	go func() {
 		t := time.Now()
 		genesisBlock := Block{
-			Index:     0,
-			Timestamp: t.String(),
-			BPM:       0,
-			PrevHash:  "",
+			Index:      0,
+			Timestamp:  t.String(),
+			BPM:        0,
+			PrevHash:   "",
+			Difficulty: 6,
 		}
 
 		genesisBlock.Hash = calculateHash(genesisBlock)
