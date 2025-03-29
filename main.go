@@ -97,7 +97,7 @@ func generateBlock(oldBlock Block, BPM int, privKey *ecdsa.PrivateKey) (Block, e
 	return newBlock, nil
 }
 
-func verifyBlcokSignature(block Block, pubKey *ecdsa.PublicKey) bool {
+func verifyBlocokSignature(block Block, pubKey *ecdsa.PublicKey) bool {
 	blockHash := calculateHash(block)
 
 	hash := sha256.New()
@@ -119,6 +119,10 @@ func isBlockValid(newBlock, oldBlock Block) bool {
 	}
 
 	if calculateHash(newBlock) != newBlock.Hash {
+		return false
+	}
+
+	if !verifyBlocokSignature(newBlock, pubKey) {
 		return false
 	}
 
@@ -233,8 +237,9 @@ func main() {
 			Timestamp: t.String(),
 			BPM:       0,
 			PrevHash:  "",
-			Hash:      "",
 		}
+
+		genesisBlock.Hash = calculateHash(genesisBlock)
 
 		r, s, err := signBlockHash(privKey, genesisBlock)
 		if err != nil {
